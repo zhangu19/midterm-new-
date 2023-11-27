@@ -1,0 +1,164 @@
+---
+title: "Floods: exploratory data analysis"
+author: Zhan Gu
+date: 2023 Oct 28
+format: html
+engine: knitr
+---
+## Background
+Floods are among the most destructive natural disasters. In the United States, natural disaster recovery is managed by (FEMA) Federal Emergency Managment Agency. This report aims to investigate floods in 2020-2021 and try to answer the following questions: 
+How dangerous are floods? How expensive? Is there any pattern to the kinds of communities that suffer losses from floods?
+
+## Data sources
+[NOAA Storm Events Database](https://www.ncdc.noaa.gov/stormevents/ftp.jsp)
+[OpenFEMA Dataset: FEMA Web Disaster Summaries - v1](https://www.fema.gov/openfema-data-page/fema-web-disaster-summaries-v1)
+[OpenFEMA Dataset: Disaster Declarations Summaries - v2](https://www.fema.gov/openfema-data-page/disaster-declarations-summaries-v2)
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+library(knitr)  
+library(readr)
+library(dplyr)
+library(kableExtra)
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(rfema)
+library(lubridate)
+```
+## Overview of FEMA data
+Number of Flood Events: There were 14 unique flood events during 2020 to 2021.
+
+Affected States: These flood events impacted 13 different states.
+
+Timeframe of Incidents: The timeframe of the flood events extends from September 17, 2019, to August 21, 2021. This range suggests that some flood events either had prolonged impacts or that their relief and recovery efforts spanned into the 2020-2021 period.
+
+Total Financial Assistance: The total financial assistance provided for these floods amounted to approximately $14.1 billion. This total encompasses various forms of financial assistance, including individual and public assistance, housing assistance, and hazard mitigation grants.
+
+Average Financial Assistance per Event: On average, each flood event received about $1.01 billion in financial assistance.
+```{r message=FALSE, warning=FALSE}
+# FEMA
+declarations_data <- read_csv("Declarations.csv")
+disaster_data <- read_csv("Disaster.csv")
+
+# Filter for floods in 2020 and 2021
+floods_declarations <- declarations_data %>%
+  filter(incidentType == "Flood", fyDeclared %in% c(2020, 2021))
+
+# Merge the data
+merged_data <- left_join(floods_declarations, disaster_data, by = "disasterNumber")
+
+# Count the number of flood incidents for each state
+state_counts <- merged_data %>% 
+  group_by(state) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count))
+
+# Count the number of flood incidents for each state
+merged_data$totalEconomicLoss <- rowSums(merged_data[,c('totalAmountIhpApproved', 'totalAmountHaApproved', 
+                                                       'totalAmountOnaApproved', 'totalObligatedAmountPa', 
+                                                       'totalObligatedAmountCatAb', 'totalObligatedAmountCatC2g', 
+                                                       'totalObligatedAmountHmgp')], na.rm = TRUE)
+
+state_loss <- merged_data %>% 
+  group_by(state) %>% 
+  summarise(TotalLoss = sum(totalEconomicLoss, na.rm = TRUE)) %>% 
+  arrange(desc(TotalLoss))
+
+# Convert date columns to Date type
+date_columns <- c("declarationDate", "incidentBeginDate", "incidentEndDate")
+merged_data[date_columns] <- lapply(merged_data[date_columns], ymd)
+
+# Replace missing financial values with 0
+financial_columns <- c("totalObligatedAmountPa", "totalObligatedAmountCatAb", 
+                       "totalObligatedAmountCatC2g", "totalObligatedAmountHmgp")
+merged_data[financial_columns] <- lapply(merged_data[financial_columns], function(x) ifelse(is.na(x), 0, x))
+
+# Delete irrelevant columns
+columns_to_keep <- c("disasterNumber", "declarationDate", "incidentBeginDate", "incidentEndDate",
+                     "declarationTitle", "state", "designatedArea", 
+                     "totalObligatedAmountPa", "totalObligatedAmountCatAb", 
+                     "totalObligatedAmountCatC2g", "totalObligatedAmountHmgp")
+merged_data <- select(merged_data, one_of(columns_to_keep))
+
+# Summary statistics
+summary <- data.frame(
+  "Number of Flood Events" = n_distinct(merged_data$disasterNumber),
+  "Affected States" = n_distinct(merged_data$state),
+  "Timeframe Start" = min(merged_data$incidentBeginDate, na.rm = TRUE),
+  "Timeframe End" = max(merged_data$incidentEndDate, na.rm = TRUE),
+  "Total Financial Assistance" = sum(sapply(merged_data[financial_columns], sum), na.rm = TRUE)
+)
+```
+
+```{r message=FALSE, warning=FALSE}
+# NOAA
+storm2020 <- read.csv("storm2020.csv")
+storm2021 <- read.csv("storm2021.csv")
+flood2020 <- storm2020 %>% filter(EVENT_TYPE == "Flood")
+flood2021 <- storm2021 %>% filter(EVENT_TYPE == "Flood")
+combined_data <- bind_rows(flood2020, flood2021)
+write.csv(combined_data, "combined_data.csv", row.names = TRUE)
+
+# Convert date columns to Date type
+combined_data <- combined_data %>%
+  mutate(begin_date = make_date(BEGIN_YEARMONTH / 100, BEGIN_YEARMONTH %% 100, BEGIN_DAY),
+         end_date = make_date(END_YEARMONTH / 100, END_YEARMONTH %% 100, END_DAY))
+
+# Delete irrelevant columns
+columns_to_select <- c("EPISODE_ID","EVENT_ID","begin_date", "end_date", "STATE", "YEAR", "INJURIES_DIRECT","INJURIES_INDIRECT","DEATHS_DIRECT","DEATHS_INDIRECT","DAMAGE_PROPERTY","DAMAGE_CROPS","FLOOD_CAUSE")
+combined_data <- select(combined_data, one_of(columns_to_select))
+```
+
+
+## How dangerous?
+```{r message=FALSE, warning=FALSE}
+#FEMA
+ggplot(state_counts, aes(x = reorder(state, -count), y = count)) + 
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_minimal() +
+  labs(title = "Number of Flood Incidents by State (FEMA)", 
+       x = "State", 
+       y = "Number of Incidents")
+
+# Counting frequency of floods in each state
+frequency_by_state <- combined_data %>%
+  count(STATE) %>%
+  arrange(desc(n))
+
+# Plotting
+ggplot(frequency_by_state, aes(x = reorder(STATE, n), y = n)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Frequency of Floods by State (NOAA)", x = "State", y = "Frequency")
+
+# Calculating duration of each flood event
+combined_data <- combined_data %>%
+  mutate(duration = as.numeric(difftime(end_date, begin_date, units = "days")))
+
+# Average duration by state
+duration_by_state <- combined_data %>%
+  group_by(STATE) %>%
+  summarize(avg_duration = mean(duration, na.rm = TRUE))
+
+# Plotting
+ggplot(duration_by_state, aes(x = reorder(STATE, avg_duration), y = avg_duration)) +
+  geom_bar(stat = "identity", fill = "coral") +
+  coord_flip() +
+  labs(title = "Average Duration of Flood Events by State (NOAA)", x = "State", y = "Average Duration (Days)")
+```
+
+## How expensive?
+```{r message=FALSE, warning=FALSE}
+ggplot(state_loss, aes(x = reorder(state, -TotalLoss), y = TotalLoss)) +
+  geom_bar(stat="identity", fill="steelblue") +
+  theme_minimal() +
+  labs(title="Total Economic Loss by State Due to Floods (FEMA)",
+       x="State", y="Total Economic Loss")
+```
+
